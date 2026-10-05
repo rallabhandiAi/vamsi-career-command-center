@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Banknote,
@@ -150,7 +150,7 @@ type DashboardData = {
   contacts: Contact[];
   activities: ActivityItem[];
   resumes: Resume[];
-  meta: { last_search_at?: string | null };
+  meta: { last_search_at?: string | null; search_policy?: string[] };
 };
 
 type GitHubSettings = {
@@ -234,7 +234,7 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
 ];
 
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
-  today: { eyebrow: "Monday, October 5", title: "Make the next move count." },
+  today: { eyebrow: "Today", title: "Make the next move count." },
   opportunities: { eyebrow: "Opportunity intelligence", title: "The roles worth your time." },
   pipeline: { eyebrow: "Application pipeline", title: "Momentum, without the noise." },
   contacts: { eyebrow: "Relationship map", title: "Every conversation has a next step." },
@@ -247,6 +247,59 @@ const stageOrder = [
   "Recruiter Contact", "Applied", "Ready to Apply", "Target", "Researching", "Offer",
   "Rejected", "Withdrawn",
 ];
+
+// Public source stays generic: the focus role, its stage and its prep actions
+// are derived from the private data, never hard-coded here.
+const PROCESS_STEPS = [
+  { short: "Apply", label: "Application", detail: "Application submitted", stages: ["Applied"] },
+  { short: "Screen", label: "Screening", detail: "Recruiter or hiring-manager conversation", stages: ["Recruiter Contact", "Recruiter Screen", "Hiring Manager"] },
+  { short: "Assess", label: "Assessment", detail: "Technical or online assessment", stages: ["Assessment"] },
+  { short: "Rounds", label: "Interview rounds", detail: "Technical, leadership and behavioral interviews", stages: ["Interview", "Team Matching"] },
+  { short: "Final", label: "Final round", detail: "Final interview and references", stages: ["Final Interview"] },
+  { short: "Offer", label: "Offer", detail: "Offer review and negotiation", stages: ["Offer"] },
+];
+
+const LIVE_STAGES = ["Offer", "Final Interview", "Team Matching", "Interview", "Assessment", "Recruiter Screen", "Hiring Manager"];
+
+const URGENCY_RANK: Record<string, number> = { "Due now": 0, "Due soon": 1, Planned: 2, Waiting: 3, None: 4 };
+
+const DEFAULT_SEARCH_POLICY = ["Senior Manager+", "$190K+ total compensation"];
+
+function processIndex(stage: string) {
+  return PROCESS_STEPS.findIndex((step) => step.stages.includes(stage));
+}
+
+function sortTasks(tasks: Task[]) {
+  return [...tasks].sort((a, b) =>
+    (URGENCY_RANK[a.urgency] ?? 9) - (URGENCY_RANK[b.urgency] ?? 9) || (a.due_on ?? "").localeCompare(b.due_on ?? ""));
+}
+
+function pickFocus(opportunities: Opportunity[], openTasks: Task[]) {
+  const live = opportunities
+    .filter((item) => LIVE_STAGES.includes(item.tracking.application_stage))
+    .sort((a, b) =>
+      a.priority.localeCompare(b.priority)
+      || LIVE_STAGES.indexOf(a.tracking.application_stage) - LIVE_STAGES.indexOf(b.tracking.application_stage)
+      || b.scores.overall - a.scores.overall);
+  if (live[0]) return live[0];
+  const byId = new Map(opportunities.map((item) => [item.id, item]));
+  for (const task of sortTasks(openTasks)) {
+    const linked = task.opportunity_id ? byId.get(task.opportunity_id) : undefined;
+    if (linked) return linked;
+  }
+  return undefined;
+}
+
+function searchPolicy(meta: DashboardData["meta"]) {
+  const items = Array.isArray(meta?.search_policy)
+    ? meta.search_policy.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  return items.length ? items : DEFAULT_SEARCH_POLICY;
+}
+
+function formatToday() {
+  return new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
+}
 
 function formatMoney(value: number | null) {
   if (!value) return "—";
@@ -437,13 +490,15 @@ export default function Home() {
     );
   }
 
-  const currentTitle = viewTitles[view];
+  const currentTitle = view === "today" ? { ...viewTitles.today, eyebrow: formatToday() } : viewTitles[view];
   const openTasks = data.tasks.filter((task) => task.status === "Open");
   const p0Tasks = openTasks.filter((task) => task.urgency === "Due now");
   const readyCount = activeOpportunities.filter((item) => item.tracking.application_stage === "Ready to Apply").length;
   const pipelineCount = activeOpportunities.filter((item) => ["Applied", "Recruiter Contact", "Recruiter Screen", "Assessment", "Interview", "Final Interview", "Team Matching", "Offer"].includes(item.tracking.application_stage)).length;
   const needsVerification = activeOpportunities.filter((item) => item.job_status === "Unclear");
-  const capitalOne = opportunityMap.get("capital-one-r1001577-1");
+  const focus = pickFocus(activeOpportunities, openTasks);
+  const focusTasks = focus ? sortTasks(openTasks.filter((task) => task.opportunity_id === focus.id)) : [];
+  const policy = searchPolicy(data.meta);
   const topRoles = activeOpportunities
     .filter((item) => ["Ready to Apply", "Target", "Researching"].includes(item.tracking.application_stage))
     .sort((a, b) => b.scores.overall - a.scores.overall)
@@ -510,7 +565,7 @@ export default function Home() {
           <div className="flex items-center gap-3">
             <SidebarTrigger className="text-slate-400 hover:bg-white/[0.06] hover:text-white" />
             <div className="hidden h-5 w-px bg-white/[0.08] sm:block" />
-            <p className="hidden text-sm text-slate-400 sm:block">Plainfield · Chicago · Remote</p>
+            <p className="hidden text-sm text-slate-400 sm:block">Chicago · Remote</p>
           </div>
           <div className="flex items-center gap-2.5">
             <div className="sync-pill"><span /> Synced {formatDate(data.generated_at)}</div>
@@ -523,7 +578,7 @@ export default function Home() {
             <div>
               <p className="eyebrow">{currentTitle.eyebrow}</p>
               <h1>{currentTitle.title}</h1>
-              <p className="search-policy">Senior Manager+ <span /> $190K+ total compensation <span /> H-1B compatible</p>
+              <p className="search-policy">{policy.map((item, index) => <Fragment key={`${index}-${item}`}>{index ? <span /> : null}{item}</Fragment>)}</p>
             </div>
             {view !== "today" ? (
               <Button variant="outline" className="hidden border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.08] hover:text-white sm:flex" onClick={() => setView("today")}>Back to Today</Button>
@@ -532,7 +587,8 @@ export default function Home() {
 
           {view === "today" ? (
             <TodayView
-              capitalOne={capitalOne}
+              focus={focus}
+              focusTask={focusTasks[0]}
               openTasks={openTasks}
               p0Tasks={p0Tasks}
               topRoles={topRoles}
@@ -555,7 +611,7 @@ export default function Home() {
           ) : null}
           {view === "pipeline" ? <PipelineView opportunities={activeOpportunities} onOpen={setSelected} /> : null}
           {view === "contacts" ? <ContactsView contacts={data.contacts} opportunityMap={opportunityMap} /> : null}
-          {view === "interview" ? <InterviewView capitalOne={capitalOne} resumes={data.resumes} /> : null}
+          {view === "interview" ? <InterviewView focus={focus} focusTasks={focusTasks} resumes={data.resumes} /> : null}
           {view === "activity" ? <ActivityView activities={data.activities} opportunityMap={opportunityMap} data={data} /> : null}
         </main>
       </SidebarInset>
@@ -612,7 +668,8 @@ function GitHubConnectionScreen({ initialMessage, onConnect }: {
 }
 
 function TodayView({
-  capitalOne,
+  focus,
+  focusTask,
   openTasks,
   p0Tasks,
   topRoles,
@@ -622,7 +679,8 @@ function TodayView({
   onOpenOpportunity,
   onChangeView,
 }: {
-  capitalOne?: Opportunity;
+  focus?: Opportunity;
+  focusTask?: Task;
   openTasks: Task[];
   p0Tasks: Task[];
   topRoles: Opportunity[];
@@ -632,10 +690,15 @@ function TodayView({
   onOpenOpportunity: (item: Opportunity) => void;
   onChangeView: (view: View) => void;
 }) {
-  const sortedTasks = [...openTasks].sort((a, b) => {
-    const urgency = { "Due now": 0, "Due soon": 1, Planned: 2, Waiting: 3, None: 4 } as Record<string, number>;
-    return (urgency[a.urgency] ?? 9) - (urgency[b.urgency] ?? 9) || a.due_on.localeCompare(b.due_on);
-  });
+  const sortedTasks = sortTasks(openTasks);
+  const current = focus ? processIndex(focus.tracking.application_stage) : -1;
+  const completed = Math.max(current, 0);
+  const headline = focus
+    ? focusTask?.title || focus.tracking.status_detail || focus.title
+    : "No live interview process yet. Move the strongest apply-ready role forward.";
+  const supporting = focus
+    ? [focusTask?.details, focus.tracking.status_detail].find((text) => text && text !== headline) ?? focus.title
+    : "Your action queue and highest-value targets below are the next best moves.";
 
   return (
     <div className="space-y-6">
@@ -645,28 +708,35 @@ function TodayView({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge className="border-0 bg-orange-400/15 text-orange-300 hover:bg-orange-400/15"><Sparkles className="mr-1.5 h-3.5 w-3.5" />Primary focus</Badge>
-              <span className="text-sm text-slate-400">Capital One · Phase 1</span>
+              {focus ? <span className="text-sm text-slate-400">{focus.company} · {focus.tracking.pipeline_phase || focus.tracking.application_stage}</span> : null}
+              {focusTask ? <span className="flex items-center gap-1 text-xs text-orange-300"><Clock3 className="h-3.5 w-3.5" />{formatDate(focusTask.due_on)}</span> : null}
             </div>
-            <h2 className="mt-4 max-w-3xl text-2xl font-semibold tracking-[-0.03em] text-white sm:text-3xl">Protect the interview opportunity. Inspect the CodeSignal invitation before the clock starts.</h2>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">The recruiter screen is complete. Your recommendation can remain valid for 12 months, while an unsuccessful attempt creates a six-month cooling period.</p>
+            <h2 className="mt-4 max-w-3xl text-2xl font-semibold tracking-[-0.03em] text-white sm:text-3xl">{headline}</h2>
+            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">{supporting}</p>
             <div className="mt-5 flex flex-wrap gap-3">
-              <Button className="bg-teal-300 text-slate-950 hover:bg-teal-200" onClick={() => onChangeView("interview")}>Open interview plan</Button>
-              {capitalOne ? <Button variant="outline" className="border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.08] hover:text-white" onClick={() => onOpenOpportunity(capitalOne)}>View role context</Button> : null}
+              {focus ? (
+                <>
+                  <Button className="bg-teal-300 text-slate-950 hover:bg-teal-200" onClick={() => onChangeView("interview")}>Open interview plan</Button>
+                  <Button variant="outline" className="border-white/10 bg-white/[0.03] text-slate-200 hover:bg-white/[0.08] hover:text-white" onClick={() => onOpenOpportunity(focus)}>View role context</Button>
+                </>
+              ) : (
+                <Button className="bg-teal-300 text-slate-950 hover:bg-teal-200" onClick={() => onChangeView("opportunities")}>Review opportunities</Button>
+              )}
             </div>
           </div>
           <div className="phase-card">
             <div className="flex items-center justify-between">
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Evaluation path</p>
-              <span className="text-xs text-teal-300">1 of 6 complete</span>
+              <span className="text-xs text-teal-300">{completed} of {PROCESS_STEPS.length} complete</span>
             </div>
-            <Progress value={17} className="mt-4 h-1.5 bg-white/[0.06] [&>div]:bg-teal-300" />
+            <Progress value={Math.round((completed / PROCESS_STEPS.length) * 100)} className="mt-4 h-1.5 bg-white/[0.06] [&>div]:bg-teal-300" />
             <div className="mt-5 grid grid-cols-6 gap-2" aria-label="Interview progress">
-              {["Screen", "Code", "DE 1", "DE 2", "Behavior", "Problem"].map((step, index) => (
-                <div key={step} className="text-center">
-                  <span className={`mx-auto grid h-7 w-7 place-items-center rounded-full border text-xs ${index === 0 ? "border-teal-300 bg-teal-300 text-slate-950" : index === 1 ? "border-orange-400/70 bg-orange-400/10 text-orange-300" : "border-white/10 bg-white/[0.02] text-slate-600"}`}>
-                    {index === 0 ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+              {PROCESS_STEPS.map((step, index) => (
+                <div key={step.short} className="text-center">
+                  <span className={`mx-auto grid h-7 w-7 place-items-center rounded-full border text-xs ${index < current ? "border-teal-300 bg-teal-300 text-slate-950" : index === current ? "border-orange-400/70 bg-orange-400/10 text-orange-300" : "border-white/10 bg-white/[0.02] text-slate-600"}`}>
+                    {index < current ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
                   </span>
-                  <p className="mt-2 truncate text-[0.65rem] text-slate-500">{step}</p>
+                  <p className="mt-2 truncate text-[0.65rem] text-slate-500">{step.short}</p>
                 </div>
               ))}
             </div>
@@ -838,15 +908,13 @@ function ContactsView({ contacts, opportunityMap }: { contacts: Contact[]; oppor
   );
 }
 
-function InterviewView({ capitalOne, resumes }: { capitalOne?: Opportunity; resumes: Resume[] }) {
-  const steps = [
-    { name: "Recruiter screen", status: "Complete", detail: "Completed October 1" },
-    { name: "CodeSignal", status: "Next", detail: "70 minutes · four questions · Python expected" },
-    { name: "Data engineering I", status: "Planned", detail: "Architecture, pipelines and coding" },
-    { name: "Data engineering II", status: "Planned", detail: "Data systems and technical depth" },
-    { name: "Behavioral", status: "Planned", detail: "Leadership evidence and judgment" },
-    { name: "Problem solving", status: "Planned", detail: "Structured reasoning under ambiguity" },
-  ];
+function InterviewView({ focus, focusTasks, resumes }: { focus?: Opportunity; focusTasks: Task[]; resumes: Resume[] }) {
+  const current = focus ? processIndex(focus.tracking.application_stage) : -1;
+  const steps = PROCESS_STEPS.map((step, index) => ({
+    name: step.label,
+    status: index < current ? "Complete" : index === current ? "Current" : "Planned",
+    detail: index === current && focus?.tracking.status_detail ? focus.tracking.status_detail : step.detail,
+  }));
   const evidence = [
     { value: "35–40", label: "Engineers led", note: "Accenture global organization" },
     { value: "25–30%", label: "Cost reduction", note: "Infrastructure and platform" },
@@ -856,17 +924,25 @@ function InterviewView({ capitalOne, resumes }: { capitalOne?: Opportunity; resu
   return (
     <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
       <section className="panel">
-        <div className="panel-header"><div><p className="section-kicker">Capital One</p><h2>Standardized evaluation</h2></div>{capitalOne ? <span className={`stage-chip ${stageClass(capitalOne.tracking.application_stage)}`}>{capitalOne.tracking.application_stage}</span> : null}</div>
+        <div className="panel-header"><div><p className="section-kicker">{focus ? focus.company : "Interview center"}</p><h2>{focus ? focus.title : "No live process yet"}</h2></div>{focus ? <span className={`stage-chip ${stageClass(focus.tracking.application_stage)}`}>{focus.tracking.application_stage}</span> : null}</div>
         <div className="p-5 sm:p-6">
-          <div className="interview-timeline">
-            {steps.map((step, index) => (
-              <div className="interview-step" key={step.name}>
-                <div className={`step-marker ${step.status === "Complete" ? "step-complete" : step.status === "Next" ? "step-next" : ""}`}>{step.status === "Complete" ? <CheckCircle2 className="h-4 w-4" /> : index + 1}</div>
-                <div className="min-w-0 flex-1 pb-7"><div className="flex items-center justify-between gap-3"><h3 className="font-medium text-slate-100">{step.name}</h3><span className={`text-xs ${step.status === "Next" ? "text-orange-300" : step.status === "Complete" ? "text-teal-300" : "text-slate-600"}`}>{step.status}</span></div><p className="mt-1 text-sm text-slate-500">{step.detail}</p></div>
+          {focus ? (
+            <>
+              <div className="interview-timeline">
+                {steps.map((step, index) => (
+                  <div className="interview-step" key={step.name}>
+                    <div className={`step-marker ${step.status === "Complete" ? "step-complete" : step.status === "Current" ? "step-next" : ""}`}>{step.status === "Complete" ? <CheckCircle2 className="h-4 w-4" /> : index + 1}</div>
+                    <div className="min-w-0 flex-1 pb-7"><div className="flex items-center justify-between gap-3"><h3 className="font-medium text-slate-100">{step.name}</h3><span className={`text-xs ${step.status === "Current" ? "text-orange-300" : step.status === "Complete" ? "text-teal-300" : "text-slate-600"}`}>{step.status}</span></div><p className="mt-1 text-sm text-slate-500">{step.detail}</p></div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <div className="rounded-2xl border border-orange-300/15 bg-orange-300/[0.04] p-4"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div><p className="font-medium text-slate-100">Before opening CodeSignal</p><p className="mt-1 text-sm leading-6 text-slate-400">Record the deadline, permitted languages, proctoring and ID rules, SQL coverage, practice-test access, browser restrictions and retake policy.</p></div></div></div>
+              {focusTasks.length ? (
+                <div className="rounded-2xl border border-orange-300/15 bg-orange-300/[0.04] p-4"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0 flex-1"><p className="font-medium text-slate-100">Prep actions</p><div className="mt-2 space-y-2.5">{focusTasks.map((task) => <div key={task.id} className="text-sm leading-6 text-slate-400"><p className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-slate-200">{task.title}</span><span className={`flex items-center gap-1 text-xs ${task.urgency === "Due now" ? "text-orange-300" : "text-slate-500"}`}><Clock3 className="h-3.5 w-3.5" />{formatDate(task.due_on)}</span></p>{task.details ? <p>{task.details}</p> : null}</div>)}</div></div></div></div>
+              ) : null}
+            </>
+          ) : (
+            <EmptyState label="Your interview plan appears here once a role reaches screening or assessment." />
+          )}
         </div>
       </section>
 
