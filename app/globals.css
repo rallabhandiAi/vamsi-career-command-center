@@ -853,3 +853,201 @@ a {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Editing: task completion, connection pill and the role editor */
+.task-row {
+  padding-left: 0.85rem;
+}
+
+.task-main {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.8rem;
+  text-align: left;
+}
+
+.task-check {
+  display: grid;
+  height: 1.6rem;
+  width: 1.6rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid rgba(117, 230, 210, 0.22);
+  border-radius: 999px;
+  color: transparent;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.task-check:hover:not(:disabled),
+.task-check:focus-visible {
+  border-color: #75e6d2;
+  background: rgba(117, 230, 210, 0.12);
+  color: #75e6d2;
+}
+
+.task-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.task-check-spinner {
+  height: 0.8rem;
+  width: 0.8rem;
+  border: 2px solid rgba(117, 230, 210, 0.25);
+  border-top-color: #75e6d2;
+  border-radius: 999px;
+  animation: task-spin 700ms linear infinite;
+}
+
+@keyframes task-spin {
+  to { transform: rotate(360deg); }
+}
+
+.connection-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid rgba(117, 230, 210, 0.16);
+  border-radius: 999px;
+  background: rgba(117, 230, 210, 0.05);
+  padding: 0.4rem 0.7rem;
+  color: #99ecde;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.connection-pill:hover {
+  background: rgba(117, 230, 210, 0.1);
+}
+
+.connection-pill-warn {
+  border-color: rgba(251, 146, 60, 0.3);
+  background: rgba(251, 146, 60, 0.08);
+  color: #fdba74;
+}
+
+.connection-link {
+  color: #8ef0de;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.connection-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 1rem;
+  color: #9fb1bf;
+  font-size: 0.78rem;
+}
+
+.connection-actions button:hover {
+  color: #e4edf3;
+}
+
+.connection-disconnect {
+  color: #fca5a5;
+}
+
+.editor-card {
+  border: 1px solid rgba(117, 230, 210, 0.16);
+  border-radius: 1rem;
+  background: rgba(117, 230, 210, 0.035);
+  padding: 1rem;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.editor-field {
+  display: grid;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.editor-wide {
+  grid-column: 1 / -1;
+}
+
+.editor-field > span {
+  color: #748a9b;
+  font-size: 0.64rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.editor-field select,
+.editor-field input,
+.editor-field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  background: rgba(7, 16, 27, 0.7);
+  padding: 0.5rem 0.65rem;
+  color: #e4edf3;
+  font-size: 0.85rem;
+  color-scheme: dark;
+}
+
+.editor-field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.editor-field select:focus-visible,
+.editor-field input:focus-visible,
+.editor-field textarea:focus-visible {
+  border-color: #75e6d2;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(117, 230, 210, 0.15);
+}
+
+.editor-field :disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.editor-hint {
+  margin-top: 0.8rem;
+  border-left: 2px solid rgba(251, 191, 36, 0.5);
+  padding-left: 0.7rem;
+  color: #c9b98a;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.editor-link {
+  color: #8ef0de;
+  font-size: 0.75rem;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 639px) {
+  .connection-pill span {
+    display: none;
+  }
+
+  .editor-grid {
+    grid-template-columns: 1fr;
+  }
+}

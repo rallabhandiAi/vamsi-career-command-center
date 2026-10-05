@@ -1,12 +1,14 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { Toaster, toast } from "sonner";
 import {
   Activity,
   Banknote,
   BookOpen,
   BrainCircuit,
   CalendarDays,
+  Check,
   CheckCircle2,
   ChevronRight,
   Circle,
@@ -65,6 +67,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  commitDataEdits,
+  GitHubError,
+  readDataJson,
+  TOKEN_SETTINGS_URL,
+  type FileEdit,
+  type GitHubSettings,
+} from "@/lib/github-data";
 
 type View = "today" | "opportunities" | "pipeline" | "contacts" | "interview" | "activity";
 
@@ -151,61 +161,54 @@ type DashboardData = {
   activities: ActivityItem[];
   resumes: Resume[];
   meta: { last_search_at?: string | null; search_policy?: string[] };
-};
-
-type GitHubSettings = {
-  owner: string;
-  repo: string;
-  branch: string;
-  token: string;
+  profile?: { search_policy?: string[] };
 };
 
 const GITHUB_SETTINGS_KEY = "vamsi-career-command-center-github";
 const SITE_BASE_PATH = process.env.NEXT_PUBLIC_SITE_BASE_PATH ?? "";
 
-function decodeGitHubContent(content: string) {
-  const binary = atob(content.replace(/\s/g, ""));
-  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+// Allowed values from the private data repository's AGENTS.md and validator.
+const STAGES = [
+  "Researching", "Target", "Ready to Apply", "Applied", "Recruiter Contact", "Recruiter Screen",
+  "Assessment", "Hiring Manager", "Interview", "Final Interview", "Team Matching", "Offer",
+  "Rejected", "Withdrawn",
+];
+const JOB_STATUSES = ["Open", "Closed", "Unclear", "Recruiter-only lead"];
+const PRIORITIES = ["P0", "P1", "P2", "P3", "Archive"];
+const IN_PROCESS_STAGES = [
+  "Applied", "Recruiter Contact", "Recruiter Screen", "Assessment", "Hiring Manager",
+  "Interview", "Final Interview", "Team Matching", "Offer",
+];
+const ENDED_STAGES = ["Rejected", "Withdrawn"];
+const UPDATED_BY = "vamsi-dashboard";
+const CLOSED_OUT = "Closed out";
+
+// A role leaves the active views when the application ended, or when the posting
+// closed before an application was in motion. A closed posting with a live
+// application stays visible (data contract rule 5).
+function isClosedOut(item: Opportunity) {
+  const stage = item.tracking.application_stage;
+  return ENDED_STAGES.includes(stage) || (item.job_status === "Closed" && !IN_PROCESS_STAGES.includes(stage));
 }
 
-async function fetchGitHubJson(settings: GitHubSettings, path: string) {
-  const response = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(settings.owner)}/${encodeURIComponent(settings.repo)}/contents/data/${encodeURIComponent(path)}?ref=${encodeURIComponent(settings.branch)}`,
-    {
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${settings.token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      cache: "no-store",
-    },
-  );
-  if (!response.ok) {
-    if (response.status === 401) throw new Error("GitHub rejected the token. Confirm that it is active and copied completely.");
-    if (response.status === 403) throw new Error("The token cannot read this repository. Grant it Contents: Read access to the private data repository.");
-    if (response.status === 404) throw new Error("The private data repository or branch could not be found with this token.");
-    throw new Error(`GitHub returned ${response.status} while loading ${path}.`);
-  }
-  const payload = await response.json() as { content?: string };
-  if (!payload.content) throw new Error(`GitHub returned no content for ${path}.`);
-  return JSON.parse(decodeGitHubContent(payload.content));
+function nowIso() {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 async function loadPrivateDashboard(settings: GitHubSettings): Promise<DashboardData> {
-  const [opportunitiesDoc, trackingDoc, tasksDoc, contactsDoc, activityDoc, resumesDoc, metaDoc] = await Promise.all([
-    fetchGitHubJson(settings, "opportunities.json"),
-    fetchGitHubJson(settings, "tracking.json"),
-    fetchGitHubJson(settings, "tasks.json"),
-    fetchGitHubJson(settings, "contacts.json"),
-    fetchGitHubJson(settings, "activity.json"),
-    fetchGitHubJson(settings, "resumes.json"),
-    fetchGitHubJson(settings, "meta.json"),
+  type TrackingDoc = { tracking: (Opportunity["tracking"] & { opportunity_id: string })[] };
+  const [opportunitiesDoc, trackingDoc, tasksDoc, contactsDoc, activityDoc, resumesDoc, metaDoc, profileDoc] = await Promise.all([
+    readDataJson<{ opportunities: Omit<Opportunity, "tracking">[] }>(settings, "opportunities.json"),
+    readDataJson<TrackingDoc>(settings, "tracking.json"),
+    readDataJson<{ tasks: Task[] }>(settings, "tasks.json"),
+    readDataJson<{ contacts: Contact[] }>(settings, "contacts.json"),
+    readDataJson<{ activities: ActivityItem[] }>(settings, "activity.json"),
+    readDataJson<{ resumes: Resume[] }>(settings, "resumes.json"),
+    readDataJson<DashboardData["meta"]>(settings, "meta.json"),
+    readDataJson<DashboardData["profile"]>(settings, "profile.json").catch(() => undefined),
   ]);
-  const trackingByOpportunity = new Map<string, Opportunity["tracking"]>(
-    trackingDoc.tracking.map((item: Opportunity["tracking"] & { opportunity_id: string }) => [item.opportunity_id, item]),
-  );
-  const opportunities = opportunitiesDoc.opportunities.map((opportunity: Omit<Opportunity, "tracking">) => ({
+  const trackingByOpportunity = new Map(trackingDoc.tracking.map((item) => [item.opportunity_id, item]));
+  const opportunities = opportunitiesDoc.opportunities.map((opportunity) => ({
     ...opportunity,
     tracking: trackingByOpportunity.get(opportunity.id) ?? {
       application_stage: "Researching",
@@ -221,6 +224,138 @@ async function loadPrivateDashboard(settings: GitHubSettings): Promise<Dashboard
     activities: activityDoc.activities,
     resumes: resumesDoc.resumes,
     meta: metaDoc,
+    profile: profileDoc,
+  };
+}
+
+type RoleUpdate = {
+  application_stage: string;
+  job_status: string;
+  priority: string;
+  applied_on: string;
+  pipeline_phase: string;
+  status_detail: string;
+};
+
+function roleForm(item: Opportunity): RoleUpdate {
+  return {
+    application_stage: item.tracking.application_stage,
+    job_status: item.job_status,
+    priority: item.priority,
+    applied_on: item.tracking.applied_on ?? "",
+    pipeline_phase: item.tracking.pipeline_phase ?? "",
+    status_detail: item.tracking.status_detail ?? "",
+  };
+}
+
+function describeRoleChanges(item: Opportunity, next: RoleUpdate) {
+  const before = roleForm(item);
+  const changes: string[] = [];
+  if (next.application_stage !== before.application_stage) changes.push(`stage ${before.application_stage} → ${next.application_stage}`);
+  if (next.job_status !== before.job_status) changes.push(`posting ${before.job_status} → ${next.job_status}`);
+  if (next.priority !== before.priority) changes.push(`priority ${before.priority} → ${next.priority}`);
+  if (next.applied_on !== before.applied_on) changes.push(next.applied_on ? `applied on ${next.applied_on}` : "cleared applied date");
+  if (next.pipeline_phase !== before.pipeline_phase) changes.push("updated pipeline phase");
+  if (next.status_detail !== before.status_detail) changes.push("updated next step");
+  return changes;
+}
+
+function activityEvent(type: string, opportunityId: string | null, summary: string, at: string) {
+  const slug = (opportunityId ?? "general").slice(0, 48);
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return { id: `act-${at.slice(0, 10)}-${slug}-${suffix}`, occurred_at: at, type, opportunity_id: opportunityId, summary };
+}
+
+function roleEdits(item: Opportunity, next: RoleUpdate, at: string): { edits: FileEdit[]; event: ActivityItem; changes: string[] } {
+  const before = roleForm(item);
+  const changes = describeRoleChanges(item, next);
+  const edits: FileEdit[] = [];
+  const trackingFields = ["application_stage", "applied_on", "pipeline_phase", "status_detail"] as const;
+  if (trackingFields.some((field) => next[field] !== before[field])) {
+    edits.push({
+      name: "tracking.json",
+      apply: (doc) => {
+        const list = (doc.data as { tracking: { opportunity_id: string }[] }).tracking;
+        const index = list.findIndex((entry) => entry.opportunity_id === item.id);
+        const appliedOn = next.applied_on || null;
+        if (index === -1) {
+          doc.append(["tracking"], {
+            opportunity_id: item.id,
+            application_stage: next.application_stage,
+            applied_on: appliedOn,
+            pipeline_phase: next.pipeline_phase,
+            status_detail: next.status_detail,
+            resume_variant: item.resume_variant ?? "",
+            contact_ids: [],
+            referral_ids: [],
+            updated_by: UPDATED_BY,
+            updated_at: at,
+          });
+        } else {
+          if (next.application_stage !== before.application_stage) doc.set(["tracking", index, "application_stage"], next.application_stage);
+          if (next.applied_on !== before.applied_on) doc.set(["tracking", index, "applied_on"], appliedOn);
+          if (next.pipeline_phase !== before.pipeline_phase) doc.set(["tracking", index, "pipeline_phase"], next.pipeline_phase);
+          if (next.status_detail !== before.status_detail) doc.set(["tracking", index, "status_detail"], next.status_detail);
+          doc.set(["tracking", index, "updated_by"], UPDATED_BY);
+          doc.set(["tracking", index, "updated_at"], at);
+        }
+        doc.set(["updated_at"], at);
+      },
+    });
+  }
+  if (next.job_status !== before.job_status || next.priority !== before.priority) {
+    edits.push({
+      name: "opportunities.json",
+      apply: (doc) => {
+        const list = (doc.data as { opportunities: { id: string }[] }).opportunities;
+        const index = list.findIndex((entry) => entry.id === item.id);
+        if (index === -1) throw new Error("This role is no longer in the data repository. Reload and try again.");
+        if (next.job_status !== before.job_status) doc.set(["opportunities", index, "job_status"], next.job_status);
+        if (next.priority !== before.priority) doc.set(["opportunities", index, "priority"], next.priority);
+        doc.set(["opportunities", index, "updated_at"], at);
+        doc.set(["updated_at"], at);
+      },
+    });
+  }
+  const event = activityEvent("tracker_update", item.id, `Updated from the dashboard: ${changes.join("; ")}.`, at);
+  edits.push({
+    name: "activity.json",
+    apply: (doc) => {
+      doc.append(["activities"], event);
+      doc.set(["updated_at"], at);
+    },
+  });
+  return { edits, event, changes };
+}
+
+function taskEdits(task: Task, status: string, at: string): { edits: FileEdit[]; event: ActivityItem } {
+  const event = activityEvent(
+    status === "Done" ? "task_completed" : "task_reopened",
+    task.opportunity_id,
+    `${status === "Done" ? "Completed" : "Reopened"} task: ${task.title}.`,
+    at,
+  );
+  return {
+    event,
+    edits: [
+      {
+        name: "tasks.json",
+        apply: (doc) => {
+          const list = (doc.data as { tasks: { id: string }[] }).tasks;
+          const index = list.findIndex((entry) => entry.id === task.id);
+          if (index === -1) throw new Error("This task is no longer in the data repository. Reload and try again.");
+          doc.set(["tasks", index, "status"], status);
+          doc.set(["updated_at"], at);
+        },
+      },
+      {
+        name: "activity.json",
+        apply: (doc) => {
+          doc.append(["activities"], event);
+          doc.set(["updated_at"], at);
+        },
+      },
+    ],
   };
 }
 
@@ -243,7 +378,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
 };
 
 const stageOrder = [
-  "Assessment", "Interview", "Final Interview", "Team Matching", "Recruiter Screen",
+  "Assessment", "Interview", "Final Interview", "Team Matching", "Hiring Manager", "Recruiter Screen",
   "Recruiter Contact", "Applied", "Ready to Apply", "Target", "Researching", "Offer",
   "Rejected", "Withdrawn",
 ];
@@ -290,11 +425,13 @@ function pickFocus(opportunities: Opportunity[], openTasks: Task[]) {
   return undefined;
 }
 
-function searchPolicy(meta: DashboardData["meta"]) {
-  const items = Array.isArray(meta?.search_policy)
-    ? meta.search_policy.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    : [];
-  return items.length ? items : DEFAULT_SEARCH_POLICY;
+function searchPolicy(data: DashboardData) {
+  const clean = (list?: unknown) =>
+    Array.isArray(list) ? list.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+  const fromProfile = clean(data.profile?.search_policy);
+  if (fromProfile.length) return fromProfile;
+  const fromMeta = clean(data.meta?.search_policy);
+  return fromMeta.length ? fromMeta : DEFAULT_SEARCH_POLICY;
 }
 
 function formatToday() {
@@ -387,7 +524,11 @@ export default function Home() {
   const [view, setView] = useState<View>("today");
   const [search, setSearch] = useState("");
   const [stageFilter, setStageFilter] = useState("All stages");
-  const [selected, setSelected] = useState<Opportunity | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<GitHubSettings | null>(null);
+  const [showConnect, setShowConnect] = useState(false);
+  const [readOnlyToken, setReadOnlyToken] = useState(false);
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -406,8 +547,12 @@ export default function Home() {
           if (active) setConnectionNeeded(true);
           return;
         }
-        const payload = await loadPrivateDashboard(JSON.parse(saved) as GitHubSettings);
-        if (active) setData(payload);
+        const savedSettings = JSON.parse(saved) as GitHubSettings;
+        const payload = await loadPrivateDashboard(savedSettings);
+        if (active) {
+          setSettings(savedSettings);
+          setData(payload);
+        }
       } catch (error) {
         if (!active) return;
         const saved = window.localStorage.getItem(GITHUB_SETTINGS_KEY);
@@ -423,12 +568,85 @@ export default function Home() {
     return () => { active = false; };
   }, []);
 
-  const connectGitHub = async (settings: GitHubSettings) => {
-    const payload = await loadPrivateDashboard(settings);
-    window.localStorage.setItem(GITHUB_SETTINGS_KEY, JSON.stringify(settings));
+  const connectGitHub = async (next: GitHubSettings) => {
+    const payload = await loadPrivateDashboard(next);
+    window.localStorage.setItem(GITHUB_SETTINGS_KEY, JSON.stringify(next));
+    setSettings(next);
     setData(payload);
+    setReadOnlyToken(false);
     setConnectionNeeded(false);
+    setShowConnect(false);
     setConnectionMessage("");
+  };
+
+  const disconnectGitHub = () => {
+    window.localStorage.removeItem(GITHUB_SETTINGS_KEY);
+    setSettings(null);
+    setData(null);
+    setShowConnect(false);
+    setConnectionNeeded(true);
+  };
+
+  const handleWriteError = (error: unknown) => {
+    if (error instanceof GitHubError && (error.status === 403 || error.status === 404)) setReadOnlyToken(true);
+    return error instanceof Error ? error.message : "The change could not be saved.";
+  };
+
+  const saveRole = async (item: Opportunity, next: RoleUpdate) => {
+    if (!settings) throw new Error("Connect your private data repository to save changes.");
+    const at = nowIso();
+    const { edits, event, changes } = roleEdits(item, next, at);
+    if (!changes.length) return;
+    try {
+      await commitDataEdits(settings, `Tracker: ${item.company} — ${changes.join("; ")}`, edits);
+    } catch (error) {
+      throw new Error(handleWriteError(error));
+    }
+    setReadOnlyToken(false);
+    setData((current) => current && {
+      ...current,
+      opportunities: current.opportunities.map((entry) => entry.id !== item.id ? entry : {
+        ...entry,
+        job_status: next.job_status,
+        priority: next.priority,
+        tracking: {
+          ...entry.tracking,
+          application_stage: next.application_stage,
+          applied_on: next.applied_on || null,
+          pipeline_phase: next.pipeline_phase,
+          status_detail: next.status_detail,
+        },
+      }),
+      activities: [...current.activities, event],
+    });
+    toast.success(`Saved to GitHub: ${changes.join("; ")}`);
+  };
+
+  const setTaskStatus = async (task: Task, status: "Done" | "Open") => {
+    if (!settings) {
+      toast.error("Connect your private data repository to update tasks.");
+      return;
+    }
+    setBusyTaskId(task.id);
+    try {
+      const { edits, event } = taskEdits(task, status, nowIso());
+      await commitDataEdits(settings, `Tracker: ${status === "Done" ? "done" : "reopened"} — ${task.title}`, edits);
+      setReadOnlyToken(false);
+      setData((current) => current && {
+        ...current,
+        tasks: current.tasks.map((entry) => entry.id === task.id ? { ...entry, status } : entry),
+        activities: [...current.activities, event],
+      });
+      if (status === "Done") {
+        toast.success(`Done: ${task.title}`, { action: { label: "Undo", onClick: () => void setTaskStatus(task, "Open") } });
+      } else {
+        toast.success(`Reopened: ${task.title}`);
+      }
+    } catch (error) {
+      toast.error(handleWriteError(error), { duration: 10000 });
+    } finally {
+      setBusyTaskId(null);
+    }
   };
 
   const opportunityMap = useMemo(
@@ -437,16 +655,22 @@ export default function Home() {
   );
 
   const activeOpportunities = useMemo(
-    () => data?.opportunities.filter((item) => item.job_status !== "Closed") ?? [],
+    () => data?.opportunities.filter((item) => !isClosedOut(item)) ?? [],
+    [data],
+  );
+
+  const closedOutOpportunities = useMemo(
+    () => data?.opportunities.filter(isClosedOut) ?? [],
     [data],
   );
 
   const filteredOpportunities = useMemo(() => {
     const needle = search.toLowerCase().trim();
-    return activeOpportunities
+    const source = stageFilter === CLOSED_OUT ? closedOutOpportunities : activeOpportunities;
+    return source
       .filter((item) => {
         const matchesText = !needle || `${item.company} ${item.title} ${item.location} ${item.req_id}`.toLowerCase().includes(needle);
-        const matchesStage = stageFilter === "All stages" || item.tracking.application_stage === stageFilter;
+        const matchesStage = stageFilter === "All stages" || stageFilter === CLOSED_OUT || item.tracking.application_stage === stageFilter;
         return matchesText && matchesStage;
       })
       .sort((a, b) => {
@@ -456,10 +680,26 @@ export default function Home() {
         if (aStage !== bStage) return aStage - bStage;
         return b.scores.overall - a.scores.overall;
       });
-  }, [activeOpportunities, search, stageFilter]);
+  }, [activeOpportunities, closedOutOpportunities, search, stageFilter]);
 
-  if (connectionNeeded && !data) {
-    return <GitHubConnectionScreen initialMessage={connectionMessage} onConnect={connectGitHub} />;
+  const stageOptions = useMemo(() => {
+    const present = new Set(activeOpportunities.map((item) => item.tracking.application_stage));
+    return ["All stages", ...STAGES.filter((stage) => present.has(stage)), CLOSED_OUT];
+  }, [activeOpportunities]);
+
+  const selected = selectedId ? opportunityMap.get(selectedId) ?? null : null;
+  const openRole = (item: Opportunity) => setSelectedId(item.id);
+
+  if (showConnect || (connectionNeeded && !data)) {
+    return (
+      <GitHubConnectionScreen
+        initialMessage={connectionMessage}
+        initialSettings={settings}
+        onConnect={connectGitHub}
+        onCancel={data ? () => setShowConnect(false) : undefined}
+        onDisconnect={settings ? disconnectGitHub : undefined}
+      />
+    );
   }
 
   if (!data && !loadError) {
@@ -494,11 +734,13 @@ export default function Home() {
   const openTasks = data.tasks.filter((task) => task.status === "Open");
   const p0Tasks = openTasks.filter((task) => task.urgency === "Due now");
   const readyCount = activeOpportunities.filter((item) => item.tracking.application_stage === "Ready to Apply").length;
-  const pipelineCount = activeOpportunities.filter((item) => ["Applied", "Recruiter Contact", "Recruiter Screen", "Assessment", "Interview", "Final Interview", "Team Matching", "Offer"].includes(item.tracking.application_stage)).length;
+  const pipelineCount = activeOpportunities.filter((item) => IN_PROCESS_STAGES.includes(item.tracking.application_stage)).length;
   const needsVerification = activeOpportunities.filter((item) => item.job_status === "Unclear");
   const focus = pickFocus(activeOpportunities, openTasks);
   const focusTasks = focus ? sortTasks(openTasks.filter((task) => task.opportunity_id === focus.id)) : [];
-  const policy = searchPolicy(data.meta);
+  const policy = searchPolicy(data);
+  const canEdit = Boolean(settings);
+  const taskActions = { canEdit, busyTaskId, onComplete: (task: Task) => void setTaskStatus(task, "Done") };
   const topRoles = activeOpportunities
     .filter((item) => ["Ready to Apply", "Target", "Researching"].includes(item.tracking.application_stage))
     .sort((a, b) => b.scores.overall - a.scores.overall)
@@ -569,6 +811,14 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-2.5">
             <div className="sync-pill"><span /> Synced {formatDate(data.generated_at)}</div>
+            <button
+              className={`connection-pill ${readOnlyToken ? "connection-pill-warn" : ""}`}
+              onClick={() => setShowConnect(true)}
+              title="GitHub data connection"
+            >
+              <KeyRound className="h-3.5 w-3.5" />
+              <span>{!settings ? "Connect GitHub" : readOnlyToken ? "Read-only token" : "GitHub connected"}</span>
+            </button>
             <button className="avatar-button" aria-label="Vamsi profile">VK</button>
           </div>
         </header>
@@ -595,8 +845,9 @@ export default function Home() {
               needsVerification={needsVerification}
               opportunityMap={opportunityMap}
               metrics={{ pipelineCount, readyCount, activeCount: activeOpportunities.length }}
-              onOpenOpportunity={setSelected}
+              onOpenOpportunity={openRole}
               onChangeView={setView}
+              taskActions={taskActions}
             />
           ) : null}
           {view === "opportunities" ? (
@@ -605,29 +856,65 @@ export default function Home() {
               search={search}
               onSearch={setSearch}
               stageFilter={stageFilter}
+              stageOptions={stageOptions}
+              closedOutCount={closedOutOpportunities.length}
               onStageFilter={setStageFilter}
-              onOpen={setSelected}
+              onOpen={openRole}
             />
           ) : null}
-          {view === "pipeline" ? <PipelineView opportunities={activeOpportunities} onOpen={setSelected} /> : null}
+          {view === "pipeline" ? <PipelineView opportunities={activeOpportunities} onOpen={openRole} /> : null}
           {view === "contacts" ? <ContactsView contacts={data.contacts} opportunityMap={opportunityMap} /> : null}
-          {view === "interview" ? <InterviewView focus={focus} focusTasks={focusTasks} resumes={data.resumes} /> : null}
+          {view === "interview" ? <InterviewView focus={focus} focusTasks={focusTasks} resumes={data.resumes} taskActions={taskActions} /> : null}
           {view === "activity" ? <ActivityView activities={data.activities} opportunityMap={opportunityMap} data={data} /> : null}
         </main>
       </SidebarInset>
 
-      <OpportunitySheet opportunity={selected} onClose={() => setSelected(null)} />
+      <OpportunitySheet
+        opportunity={selected}
+        tasks={selected ? sortTasks(openTasks.filter((task) => task.opportunity_id === selected.id)) : []}
+        canEdit={canEdit}
+        readOnlyToken={readOnlyToken}
+        onSave={saveRole}
+        onConnect={() => setShowConnect(true)}
+        taskActions={taskActions}
+        onClose={() => setSelectedId(null)}
+      />
+      <Toaster theme="dark" position="bottom-right" richColors closeButton />
     </SidebarProvider>
   );
 }
 
-function GitHubConnectionScreen({ initialMessage, onConnect }: {
+type TaskActions = { canEdit: boolean; busyTaskId: string | null; onComplete: (task: Task) => void };
+
+function TaskDoneButton({ task, actions }: { task: Task; actions: TaskActions }) {
+  const busy = actions.busyTaskId === task.id;
+  return (
+    <button
+      type="button"
+      className="task-check"
+      disabled={!actions.canEdit || busy}
+      onClick={(event) => {
+        event.stopPropagation();
+        actions.onComplete(task);
+      }}
+      title={actions.canEdit ? "Mark done" : "Connect GitHub to update tasks"}
+      aria-label={`Mark "${task.title}" done`}
+    >
+      {busy ? <span className="task-check-spinner" /> : <Check className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+function GitHubConnectionScreen({ initialMessage, initialSettings, onConnect, onCancel, onDisconnect }: {
   initialMessage: string;
+  initialSettings: GitHubSettings | null;
   onConnect: (settings: GitHubSettings) => Promise<void>;
+  onCancel?: () => void;
+  onDisconnect?: () => void;
 }) {
-  const [owner, setOwner] = useState("rallabhandiAi");
-  const [repo, setRepo] = useState("vamsi-career-command-center-data");
-  const [branch, setBranch] = useState("main");
+  const [owner, setOwner] = useState(initialSettings?.owner ?? "rallabhandiAi");
+  const [repo, setRepo] = useState(initialSettings?.repo ?? "vamsi-career-command-center-data");
+  const [branch, setBranch] = useState(initialSettings?.branch ?? "main");
   const [token, setToken] = useState("");
   const [message, setMessage] = useState(initialMessage);
   const [connecting, setConnecting] = useState(false);
@@ -637,7 +924,7 @@ function GitHubConnectionScreen({ initialMessage, onConnect }: {
     setConnecting(true);
     setMessage("");
     try {
-      await onConnect({ owner: owner.trim(), repo: repo.trim(), branch: branch.trim(), token: token.trim() });
+      await onConnect({ owner: owner.trim(), repo: repo.trim(), branch: branch.trim(), token: token.trim() || initialSettings?.token || "" });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The private GitHub data could not be loaded.");
     } finally {
@@ -651,17 +938,26 @@ function GitHubConnectionScreen({ initialMessage, onConnect }: {
         <div className="connection-brand"><span className="brand-mark">V</span><span>Career OS</span></div>
         <div className="connection-icon"><LockKeyhole /></div>
         <p className="eyebrow">Private data connection</p>
-        <h1>Connect your Career Command Center.</h1>
-        <p className="connection-copy">The GitHub Pages shell is public, but your opportunities, applications and contacts stay in the private data repository. Use a fine-grained token limited to that repository with <strong>Contents: Read-only</strong>.</p>
+        <h1>{initialSettings ? "Update your GitHub connection." : "Connect your Career Command Center."}</h1>
+        <p className="connection-copy">The GitHub Pages shell is public, but your opportunities, applications and contacts stay in the private data repository. Use a fine-grained token limited to that repository with <strong>Contents: Read and write</strong> so you can update stages and tasks here; a read-only token works for viewing.</p>
         <form onSubmit={submit} className="connection-form">
           <label><span>GitHub owner</span><Input required value={owner} onChange={(event) => setOwner(event.target.value)} autoComplete="off" /></label>
           <label><span>Private data repository</span><Input required value={repo} onChange={(event) => setRepo(event.target.value)} autoComplete="off" /></label>
           <label><span>Branch</span><Input required value={branch} onChange={(event) => setBranch(event.target.value)} autoComplete="off" /></label>
-          <label className="connection-token"><span>Fine-grained personal access token</span><div className="relative"><KeyRound className="connection-input-icon" /><Input required type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder="github_pat_…" /></div></label>
+          <label className="connection-token"><span>Fine-grained personal access token</span><div className="relative"><KeyRound className="connection-input-icon" /><Input required={!initialSettings} type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder={initialSettings ? "Leave blank to keep the saved token" : "github_pat_…"} /></div></label>
           {message ? <p className="connection-error" role="alert">{message}</p> : null}
-          <Button type="submit" disabled={connecting} className="connection-submit">{connecting ? "Connecting…" : <><GitBranch /> Connect private repository</>}</Button>
+          <Button type="submit" disabled={connecting} className="connection-submit">{connecting ? "Connecting…" : <><GitBranch /> {initialSettings ? "Save connection" : "Connect private repository"}</>}</Button>
         </form>
-        <p className="connection-footnote">The token is sent only to GitHub and stored only in this browser on this device. No token is committed to either repository.</p>
+        <p className="connection-footnote">
+          The token is sent only to GitHub and stored only in this browser on this device. No token is committed to either repository.{" "}
+          <a className="connection-link" href={TOKEN_SETTINGS_URL} target="_blank" rel="noreferrer">Manage tokens on GitHub</a>
+        </p>
+        {onCancel || onDisconnect ? (
+          <div className="connection-actions">
+            {onCancel ? <button type="button" onClick={onCancel}>Back to dashboard</button> : <span />}
+            {onDisconnect ? <button type="button" className="connection-disconnect" onClick={onDisconnect}>Forget token on this device</button> : null}
+          </div>
+        ) : null}
       </section>
     </main>
   );
@@ -678,6 +974,7 @@ function TodayView({
   metrics,
   onOpenOpportunity,
   onChangeView,
+  taskActions,
 }: {
   focus?: Opportunity;
   focusTask?: Task;
@@ -689,6 +986,7 @@ function TodayView({
   metrics: { pipelineCount: number; readyCount: number; activeCount: number };
   onOpenOpportunity: (item: Opportunity) => void;
   onChangeView: (view: View) => void;
+  taskActions: TaskActions;
 }) {
   const sortedTasks = sortTasks(openTasks);
   const current = focus ? processIndex(focus.tracking.application_stage) : -1;
@@ -761,18 +1059,21 @@ function TodayView({
             {sortedTasks.slice(0, 7).map((task, index) => {
               const opportunity = task.opportunity_id ? opportunityMap.get(task.opportunity_id) : undefined;
               return (
-                <button key={task.id} className="task-row" onClick={() => opportunity && onOpenOpportunity(opportunity)}>
-                  <span className={`task-rank ${task.urgency === "Due now" ? "task-rank-hot" : ""}`}>{String(index + 1).padStart(2, "0")}</span>
-                  <span className="min-w-0 flex-1 text-left">
-                    <span className="flex flex-wrap items-center gap-2">
-                      <span className="truncate font-medium text-slate-100">{task.title}</span>
-                      <Badge variant="outline" className="border-white/10 bg-transparent text-[0.65rem] font-medium text-slate-500">{task.category}</Badge>
+                <div key={task.id} className="task-row">
+                  <TaskDoneButton task={task} actions={taskActions} />
+                  <button className="task-main" onClick={() => opportunity && onOpenOpportunity(opportunity)}>
+                    <span className={`task-rank ${task.urgency === "Due now" ? "task-rank-hot" : ""}`}>{String(index + 1).padStart(2, "0")}</span>
+                    <span className="min-w-0 flex-1 text-left">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="truncate font-medium text-slate-100">{task.title}</span>
+                        <Badge variant="outline" className="border-white/10 bg-transparent text-[0.65rem] font-medium text-slate-500">{task.category}</Badge>
+                      </span>
+                      <span className="mt-1 block truncate text-sm text-slate-500">{opportunity ? `${opportunity.company} · ${task.details}` : task.details}</span>
                     </span>
-                    <span className="mt-1 block truncate text-sm text-slate-500">{opportunity ? `${opportunity.company} · ${task.details}` : task.details}</span>
-                  </span>
-                  <span className={`task-due ${task.urgency === "Due now" ? "text-orange-300" : "text-slate-500"}`}><Clock3 className="h-3.5 w-3.5" />{formatDate(task.due_on)}</span>
-                  <ChevronRight className="h-4 w-4 text-slate-700" />
-                </button>
+                    <span className={`task-due ${task.urgency === "Due now" ? "text-orange-300" : "text-slate-500"}`}><Clock3 className="h-3.5 w-3.5" />{formatDate(task.due_on)}</span>
+                    <ChevronRight className="h-4 w-4 text-slate-700" />
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -814,15 +1115,17 @@ function TodayView({
   );
 }
 
-function OpportunitiesView({ opportunities, search, onSearch, stageFilter, onStageFilter, onOpen }: {
+function OpportunitiesView({ opportunities, search, onSearch, stageFilter, stageOptions, closedOutCount, onStageFilter, onOpen }: {
   opportunities: Opportunity[];
   search: string;
   onSearch: (value: string) => void;
   stageFilter: string;
+  stageOptions: string[];
+  closedOutCount: number;
   onStageFilter: (value: string) => void;
   onOpen: (item: Opportunity) => void;
 }) {
-  const stages = ["All stages", "Assessment", "Applied", "Recruiter Contact", "Ready to Apply", "Target", "Researching"];
+  const stages = stageOptions.includes(stageFilter) ? stageOptions : [...stageOptions, stageFilter];
   return (
     <section className="panel overflow-hidden">
       <div className="flex flex-col gap-3 border-b border-white/[0.06] p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -831,7 +1134,7 @@ function OpportunitiesView({ opportunities, search, onSearch, stageFilter, onSta
           <Input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search company, title, location or req ID" className="border-white/10 bg-white/[0.03] pl-9 text-slate-100 placeholder:text-slate-600" />
         </div>
         <NativeSelect value={stageFilter} onChange={(event) => onStageFilter(event.target.value)} className="w-full border-white/10 bg-white/[0.03] text-slate-300 sm:w-48">
-          {stages.map((stage) => <NativeSelectOption key={stage} value={stage}>{stage}</NativeSelectOption>)}
+          {stages.map((stage) => <NativeSelectOption key={stage} value={stage}>{stage === CLOSED_OUT ? `${CLOSED_OUT} (${closedOutCount})` : stage}</NativeSelectOption>)}
         </NativeSelect>
       </div>
       <div className="overflow-x-auto">
@@ -851,7 +1154,7 @@ function OpportunitiesView({ opportunities, search, onSearch, stageFilter, onSta
           </TableBody>
         </Table>
       </div>
-      {opportunities.length === 0 ? <EmptyState label="No opportunities match these filters." /> : null}
+      {opportunities.length === 0 ? <EmptyState label={stageFilter === CLOSED_OUT ? "No closed-out roles yet." : "No opportunities match these filters."} /> : null}
     </section>
   );
 }
@@ -908,7 +1211,7 @@ function ContactsView({ contacts, opportunityMap }: { contacts: Contact[]; oppor
   );
 }
 
-function InterviewView({ focus, focusTasks, resumes }: { focus?: Opportunity; focusTasks: Task[]; resumes: Resume[] }) {
+function InterviewView({ focus, focusTasks, resumes, taskActions }: { focus?: Opportunity; focusTasks: Task[]; resumes: Resume[]; taskActions: TaskActions }) {
   const current = focus ? processIndex(focus.tracking.application_stage) : -1;
   const steps = PROCESS_STEPS.map((step, index) => ({
     name: step.label,
@@ -937,7 +1240,7 @@ function InterviewView({ focus, focusTasks, resumes }: { focus?: Opportunity; fo
                 ))}
               </div>
               {focusTasks.length ? (
-                <div className="rounded-2xl border border-orange-300/15 bg-orange-300/[0.04] p-4"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0 flex-1"><p className="font-medium text-slate-100">Prep actions</p><div className="mt-2 space-y-2.5">{focusTasks.map((task) => <div key={task.id} className="text-sm leading-6 text-slate-400"><p className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-slate-200">{task.title}</span><span className={`flex items-center gap-1 text-xs ${task.urgency === "Due now" ? "text-orange-300" : "text-slate-500"}`}><Clock3 className="h-3.5 w-3.5" />{formatDate(task.due_on)}</span></p>{task.details ? <p>{task.details}</p> : null}</div>)}</div></div></div></div>
+                <div className="rounded-2xl border border-orange-300/15 bg-orange-300/[0.04] p-4"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-orange-300" /><div className="min-w-0 flex-1"><p className="font-medium text-slate-100">Prep actions</p><div className="mt-2 space-y-2.5">{focusTasks.map((task) => <div key={task.id} className="flex gap-3 text-sm leading-6 text-slate-400"><TaskDoneButton task={task} actions={taskActions} /><div className="min-w-0 flex-1"><p className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium text-slate-200">{task.title}</span><span className={`flex items-center gap-1 text-xs ${task.urgency === "Due now" ? "text-orange-300" : "text-slate-500"}`}><Clock3 className="h-3.5 w-3.5" />{formatDate(task.due_on)}</span></p>{task.details ? <p>{task.details}</p> : null}</div></div>)}</div></div></div></div>
               ) : null}
             </>
           ) : (
@@ -972,26 +1275,169 @@ function ActivityView({ activities, opportunityMap, data }: { activities: Activi
   );
 }
 
-function OpportunitySheet({ opportunity, onClose }: { opportunity: Opportunity | null; onClose: () => void }) {
+function OpportunitySheet({ opportunity, tasks, canEdit, readOnlyToken, onSave, onConnect, taskActions, onClose }: {
+  opportunity: Opportunity | null;
+  tasks: Task[];
+  canEdit: boolean;
+  readOnlyToken: boolean;
+  onSave: (item: Opportunity, next: RoleUpdate) => Promise<void>;
+  onConnect: () => void;
+  taskActions: TaskActions;
+  onClose: () => void;
+}) {
   return (
     <Sheet open={Boolean(opportunity)} onOpenChange={(open) => !open && onClose()}>
       <SheetContent className="w-full border-white/10 bg-[#0a1321] p-0 text-slate-100 sm:max-w-xl">
         {opportunity ? (
           <ScrollArea className="h-full">
-            <SheetHeader className="border-b border-white/[0.07] p-6 pr-12 text-left"><div className="flex flex-wrap items-center gap-2"><span className={`priority-chip ${priorityClass(opportunity.priority)}`}>{opportunity.priority}</span><span className={`stage-chip ${stageClass(opportunity.tracking.application_stage)}`}>{opportunity.tracking.application_stage}</span></div><SheetTitle className="mt-4 text-2xl tracking-tight text-white">{opportunity.title}</SheetTitle><SheetDescription className="text-base text-slate-400">{opportunity.company}{opportunity.req_id ? ` · ${opportunity.req_id}` : ""}</SheetDescription></SheetHeader>
+            <SheetHeader className="border-b border-white/[0.07] p-6 pr-12 text-left"><div className="flex flex-wrap items-center gap-2"><span className={`priority-chip ${priorityClass(opportunity.priority)}`}>{opportunity.priority}</span><span className={`stage-chip ${stageClass(opportunity.tracking.application_stage)}`}>{opportunity.tracking.application_stage}</span>{opportunity.job_status !== "Open" ? <span className="stage-chip stage-muted">Posting: {opportunity.job_status}</span> : null}</div><SheetTitle className="mt-4 text-2xl tracking-tight text-white">{opportunity.title}</SheetTitle><SheetDescription className="text-base text-slate-400">{opportunity.company}{opportunity.req_id ? ` · ${opportunity.req_id}` : ""}</SheetDescription></SheetHeader>
             <div className="space-y-7 p-6">
+              <RoleEditor
+                key={`${opportunity.id}:${JSON.stringify(roleForm(opportunity))}`}
+                opportunity={opportunity}
+                canEdit={canEdit}
+                readOnlyToken={readOnlyToken}
+                onSave={onSave}
+                onConnect={onConnect}
+              />
+              {tasks.length ? (
+                <div>
+                  <p className="detail-heading">Open tasks</p>
+                  <div className="mt-3 space-y-2">
+                    {tasks.map((task) => (
+                      <div key={task.id} className="flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+                        <TaskDoneButton task={task} actions={taskActions} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-slate-100">{task.title}</p>
+                          <p className="mt-0.5 text-xs text-slate-500">{task.urgency} · {formatDate(task.due_on)}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="flex items-center gap-5 rounded-2xl border border-white/[0.06] bg-white/[0.025] p-4"><ScoreRing score={opportunity.scores.overall} size="lg" /><div><p className="text-sm font-medium text-slate-100">Weighted opportunity score</p><p className="mt-1 text-xs leading-5 text-slate-500">Career value and leadership scope receive the greatest weight. Confidence: {Math.round(opportunity.scores.confidence * 100)}%.</p></div></div>
               <div className="grid grid-cols-2 gap-3"><DetailTile icon={MapPin} label="Location" value={`${opportunity.work_mode} · ${opportunity.location}`} /><DetailTile icon={Banknote} label="Base range" value={opportunity.compensation.base_min ? `${formatMoney(opportunity.compensation.base_min)}–${formatMoney(opportunity.compensation.base_max)}` : "Not confirmed"} /><DetailTile icon={ShieldCheck} label="Sponsorship" value={opportunity.sponsorship.status} /><DetailTile icon={CalendarDays} label="Last verified" value={formatDate(opportunity.source.verified_on, true)} /></div>
               <ScoreBreakdown opportunity={opportunity} />
               <DetailList title="Why this role earns attention" items={opportunity.why_fit} positive />
               <DetailList title="Gaps and decision risks" items={opportunity.gaps} />
-              <div><p className="detail-heading">Current next step</p><div className="mt-3 rounded-2xl border border-teal-300/15 bg-teal-300/[0.04] p-4"><p className="text-sm font-medium text-slate-100">{opportunity.tracking.pipeline_phase}</p><p className="mt-1 text-sm leading-6 text-slate-400">{opportunity.tracking.status_detail}</p></div></div>
               {opportunity.source.url ? <Button asChild className="w-full bg-teal-300 text-slate-950 hover:bg-teal-200"><a href={opportunity.source.url} target="_blank" rel="noreferrer">Open official posting <ExternalLink className="ml-2 h-4 w-4" /></a></Button> : null}
             </div>
           </ScrollArea>
         ) : null}
       </SheetContent>
     </Sheet>
+  );
+}
+
+function localToday() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function RoleEditor({ opportunity, canEdit, readOnlyToken, onSave, onConnect }: {
+  opportunity: Opportunity;
+  canEdit: boolean;
+  readOnlyToken: boolean;
+  onSave: (item: Opportunity, next: RoleUpdate) => Promise<void>;
+  onConnect: () => void;
+}) {
+  const baseline = roleForm(opportunity);
+  const [form, setForm] = useState<RoleUpdate>(baseline);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const changes = describeRoleChanges(opportunity, form);
+  const locked = !canEdit || saving;
+
+  const update = (field: keyof RoleUpdate) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === "application_stage" && value === "Applied" && !current.applied_on ? { applied_on: localToday() } : {}),
+    }));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await onSave(opportunity, form);
+    } catch (problem) {
+      setError(problem instanceof Error ? problem.message : "The change could not be saved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const willCloseOut = isClosedOut({ ...opportunity, job_status: form.job_status, tracking: { ...opportunity.tracking, application_stage: form.application_stage } });
+  const hint = form.job_status === "Closed" && IN_PROCESS_STAGES.includes(form.application_stage)
+    ? `The posting is closed, but your application is still marked ${form.application_stage}, so the role stays in your pipeline. To close it out, set the stage to Rejected or Withdrawn.`
+    : willCloseOut && !isClosedOut(opportunity)
+      ? "Saving moves this role to Closed out. It stays in your history and you can reopen it from Opportunities → Closed out."
+      : "";
+
+  return (
+    <section className="editor-card">
+      <div className="flex items-center justify-between gap-3">
+        <p className="detail-heading">Update this role</p>
+        {!canEdit ? <button type="button" className="editor-link" onClick={onConnect}>Connect GitHub to edit</button> : null}
+      </div>
+      <div className="editor-grid">
+        <label className="editor-field">
+          <span>Application stage</span>
+          <select value={form.application_stage} onChange={update("application_stage")} disabled={locked}>
+            {STAGES.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+          </select>
+        </label>
+        <label className="editor-field">
+          <span>Posting</span>
+          <select value={form.job_status} onChange={update("job_status")} disabled={locked}>
+            {JOB_STATUSES.map((status) => (
+              <option key={status} value={status} disabled={status === "Open" && !opportunity.source.url && form.job_status !== "Open"}>
+                {status === "Open" && !opportunity.source.url ? "Open (needs an official URL)" : status}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="editor-field">
+          <span>Priority</span>
+          <select value={form.priority} onChange={update("priority")} disabled={locked}>
+            {PRIORITIES.map((priority) => <option key={priority} value={priority}>{priority}</option>)}
+          </select>
+        </label>
+        <label className="editor-field">
+          <span>Applied on</span>
+          <input type="date" value={form.applied_on} onChange={update("applied_on")} disabled={locked} />
+        </label>
+        <label className="editor-field editor-wide">
+          <span>Pipeline phase</span>
+          <input type="text" value={form.pipeline_phase} onChange={update("pipeline_phase")} disabled={locked} placeholder="e.g. Waiting on recruiter" />
+        </label>
+        <label className="editor-field editor-wide">
+          <span>Next step</span>
+          <textarea rows={3} value={form.status_detail} onChange={update("status_detail")} disabled={locked} placeholder="What happens next, and who owns it" />
+        </label>
+      </div>
+      {hint ? <p className="editor-hint">{hint}</p> : null}
+      {error ? (
+        <p className="connection-error mt-3" role="alert">
+          {error}{" "}
+          {readOnlyToken ? <a className="underline" href={TOKEN_SETTINGS_URL} target="_blank" rel="noreferrer">Open token settings</a> : null}
+        </p>
+      ) : null}
+      <div className="editor-actions">
+        <span className="text-xs text-slate-500">
+          {changes.length ? `${changes.length} unsaved change${changes.length > 1 ? "s" : ""}` : canEdit ? "Saves to your private data repo" : "View only"}
+        </span>
+        <div className="flex gap-2">
+          {changes.length && !saving ? <Button type="button" variant="ghost" className="text-slate-400 hover:bg-white/[0.06] hover:text-white" onClick={() => setForm(baseline)}>Reset</Button> : null}
+          <Button type="button" onClick={save} disabled={locked || !changes.length} className="bg-teal-300 text-slate-950 hover:bg-teal-200">
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 

@@ -2,7 +2,9 @@
 
 ## GitHub Pages
 
-The dashboard shell is deployed at [rallabhandiai.github.io/vamsi-career-command-center](https://rallabhandiai.github.io/vamsi-career-command-center/) by `.github/workflows/pages.yml` on every push to `main`. One-time repository setting: **Settings → Pages → Build and deployment → Source: GitHub Actions** (the workflow cannot enable Pages itself). On first use, connect the private data repository with a fine-grained GitHub token limited to `Contents: Read-only` for `rallabhandiAi/vamsi-career-command-center-data`. The token stays in that browser's local storage and is never committed to this repository.
+The dashboard shell is deployed at [rallabhandiai.github.io/vamsi-career-command-center](https://rallabhandiai.github.io/vamsi-career-command-center/) by `.github/workflows/pages.yml` on every push to `main`. One-time repository setting: **Settings → Pages → Build and deployment → Source: GitHub Actions** (the workflow cannot enable Pages itself). On first use, connect the private data repository with a fine-grained GitHub token limited to `rallabhandiAi/vamsi-career-command-center-data` with **Contents: Read and write** (read-only works for viewing). The token stays in that browser's local storage and is never committed to this repository. Use the **GitHub connected** button in the header to replace or forget the token.
+
+Open any role to update its application stage, posting status, priority, applied date, pipeline phase or next step; tick the circle beside a task to mark it done. Each save is one commit to the private data repository, with an entry in `activity.json`.
 
 A private, decision-first dashboard for job discovery, applications, recruiter relationships and interview preparation.
 
@@ -17,7 +19,7 @@ node scripts/generate-dashboard-data.mjs /path/to/vamsi-career-command-center-da
 pnpm build
 ```
 
-The current search policy targets Senior Manager and above roles with credible annual total compensation of at least $190K, prioritizing Chicago-area or U.S.-remote opportunities. Additional private policy items (for example work-authorization requirements) belong in the private repository's `meta.json` as `search_policy` (array of strings); when present, that list replaces the public default policy line.
+The current search policy targets Senior Manager and above roles with credible annual total compensation of at least $190K, prioritizing Chicago-area or U.S.-remote opportunities. The full policy line shown on the dashboard, including work-authorization requirements, lives in the private repository's `profile.json` as `search_policy` (array of strings); when present, that list replaces the public default.
 
 ## Prerequisites
 
