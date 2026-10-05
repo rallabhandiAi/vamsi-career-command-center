@@ -1,5 +1,9 @@
 # Vamsi Career Command Center
 
+## GitHub Pages
+
+The dashboard shell is deployed at [rallabhandiai.github.io/vamsi-career-command-center](https://rallabhandiai.github.io/vamsi-career-command-center/). On first use, connect the private data repository with a fine-grained GitHub token limited to `Contents: Read-only` for `rallabhandiAi/vamsi-career-command-center-data`. The token stays in that browser's local storage and is never committed to this repository.
+
 A private, decision-first dashboard for job discovery, applications, recruiter relationships and interview preparation.
 
 The public repository contains application code only. Canonical opportunities and personal workflow data live in the private companion repository [`rallabhandiAi/vamsi-career-command-center-data`](https://github.com/rallabhandiAi/vamsi-career-command-center-data). A private deployment snapshot is generated locally and intentionally stays out of public source control.
