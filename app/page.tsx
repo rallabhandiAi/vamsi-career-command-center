@@ -14,8 +14,11 @@ import {
   Clock3,
   ExternalLink,
   Gauge,
+  GitBranch,
   Kanban,
+  KeyRound,
   LayoutDashboard,
+  LockKeyhole,
   MapPin,
   Search,
   ShieldCheck,
@@ -150,6 +153,77 @@ type DashboardData = {
   meta: { last_search_at?: string | null };
 };
 
+type GitHubSettings = {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+};
+
+const GITHUB_SETTINGS_KEY = "vamsi-career-command-center-github";
+const SITE_BASE_PATH = process.env.NEXT_PUBLIC_SITE_BASE_PATH ?? "";
+
+function decodeGitHubContent(content: string) {
+  const binary = atob(content.replace(/\s/g, ""));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function fetchGitHubJson(settings: GitHubSettings, path: string) {
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(settings.owner)}/${encodeURIComponent(settings.repo)}/contents/data/${encodeURIComponent(path)}?ref=${encodeURIComponent(settings.branch)}`,
+    {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${settings.token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) {
+    if (response.status === 401) throw new Error("GitHub rejected the token. Confirm that it is active and copied completely.");
+    if (response.status === 403) throw new Error("The token cannot read this repository. Grant it Contents: Read access to the private data repository.");
+    if (response.status === 404) throw new Error("The private data repository or branch could not be found with this token.");
+    throw new Error(`GitHub returned ${response.status} while loading ${path}.`);
+  }
+  const payload = await response.json() as { content?: string };
+  if (!payload.content) throw new Error(`GitHub returned no content for ${path}.`);
+  return JSON.parse(decodeGitHubContent(payload.content));
+}
+
+async function loadPrivateDashboard(settings: GitHubSettings): Promise<DashboardData> {
+  const [opportunitiesDoc, trackingDoc, tasksDoc, contactsDoc, activityDoc, resumesDoc, metaDoc] = await Promise.all([
+    fetchGitHubJson(settings, "opportunities.json"),
+    fetchGitHubJson(settings, "tracking.json"),
+    fetchGitHubJson(settings, "tasks.json"),
+    fetchGitHubJson(settings, "contacts.json"),
+    fetchGitHubJson(settings, "activity.json"),
+    fetchGitHubJson(settings, "resumes.json"),
+    fetchGitHubJson(settings, "meta.json"),
+  ]);
+  const trackingByOpportunity = new Map<string, Opportunity["tracking"]>(
+    trackingDoc.tracking.map((item: Opportunity["tracking"] & { opportunity_id: string }) => [item.opportunity_id, item]),
+  );
+  const opportunities = opportunitiesDoc.opportunities.map((opportunity: Omit<Opportunity, "tracking">) => ({
+    ...opportunity,
+    tracking: trackingByOpportunity.get(opportunity.id) ?? {
+      application_stage: "Researching",
+      pipeline_phase: "Not started",
+      status_detail: "No workflow state recorded",
+    },
+  }));
+  return {
+    generated_at: new Date().toISOString(),
+    opportunities,
+    tasks: tasksDoc.tasks,
+    contacts: contactsDoc.contacts,
+    activities: activityDoc.activities,
+    resumes: resumesDoc.resumes,
+    meta: metaDoc,
+  };
+}
+
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "today", label: "Today", icon: LayoutDashboard },
   { id: "opportunities", label: "Opportunities", icon: Target },
@@ -255,20 +329,54 @@ function EmptyState({ label }: { label: string }) {
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [connectionNeeded, setConnectionNeeded] = useState(false);
+  const [connectionMessage, setConnectionMessage] = useState("");
   const [view, setView] = useState<View>("today");
   const [search, setSearch] = useState("");
   const [stageFilter, setStageFilter] = useState("All stages");
   const [selected, setSelected] = useState<Opportunity | null>(null);
 
   useEffect(() => {
-    fetch("/generated/dashboard.json", { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error("Dashboard data unavailable");
-        return response.json();
-      })
-      .then((payload: DashboardData) => setData(payload))
-      .catch(() => setLoadError(true));
+    let active = true;
+    const load = async () => {
+      try {
+        const response = await fetch(`${SITE_BASE_PATH}/generated/dashboard.json`, { cache: "no-store" });
+        if (response.ok) {
+          const payload = await response.json() as DashboardData;
+          if (payload.opportunities?.length) {
+            if (active) setData(payload);
+            return;
+          }
+        }
+        const saved = window.localStorage.getItem(GITHUB_SETTINGS_KEY);
+        if (!saved) {
+          if (active) setConnectionNeeded(true);
+          return;
+        }
+        const payload = await loadPrivateDashboard(JSON.parse(saved) as GitHubSettings);
+        if (active) setData(payload);
+      } catch (error) {
+        if (!active) return;
+        const saved = window.localStorage.getItem(GITHUB_SETTINGS_KEY);
+        if (saved) {
+          setConnectionMessage(error instanceof Error ? error.message : "The private GitHub data could not be loaded.");
+          setConnectionNeeded(true);
+        } else {
+          setLoadError(true);
+        }
+      }
+    };
+    void load();
+    return () => { active = false; };
   }, []);
+
+  const connectGitHub = async (settings: GitHubSettings) => {
+    const payload = await loadPrivateDashboard(settings);
+    window.localStorage.setItem(GITHUB_SETTINGS_KEY, JSON.stringify(settings));
+    setData(payload);
+    setConnectionNeeded(false);
+    setConnectionMessage("");
+  };
 
   const opportunityMap = useMemo(
     () => new Map(data?.opportunities.map((item) => [item.id, item]) ?? []),
@@ -296,6 +404,10 @@ export default function Home() {
         return b.scores.overall - a.scores.overall;
       });
   }, [activeOpportunities, search, stageFilter]);
+
+  if (connectionNeeded && !data) {
+    return <GitHubConnectionScreen initialMessage={connectionMessage} onConnect={connectGitHub} />;
+  }
 
   if (!data && !loadError) {
     return (
@@ -450,6 +562,52 @@ export default function Home() {
 
       <OpportunitySheet opportunity={selected} onClose={() => setSelected(null)} />
     </SidebarProvider>
+  );
+}
+
+function GitHubConnectionScreen({ initialMessage, onConnect }: {
+  initialMessage: string;
+  onConnect: (settings: GitHubSettings) => Promise<void>;
+}) {
+  const [owner, setOwner] = useState("rallabhandiAi");
+  const [repo, setRepo] = useState("vamsi-career-command-center-data");
+  const [branch, setBranch] = useState("main");
+  const [token, setToken] = useState("");
+  const [message, setMessage] = useState(initialMessage);
+  const [connecting, setConnecting] = useState(false);
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setConnecting(true);
+    setMessage("");
+    try {
+      await onConnect({ owner: owner.trim(), repo: repo.trim(), branch: branch.trim(), token: token.trim() });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The private GitHub data could not be loaded.");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  return (
+    <main className="connection-page">
+      <section className="connection-card">
+        <div className="connection-brand"><span className="brand-mark">V</span><span>Career OS</span></div>
+        <div className="connection-icon"><LockKeyhole /></div>
+        <p className="eyebrow">Private data connection</p>
+        <h1>Connect your Career Command Center.</h1>
+        <p className="connection-copy">The GitHub Pages shell is public, but your opportunities, applications and contacts stay in the private data repository. Use a fine-grained token limited to that repository with <strong>Contents: Read-only</strong>.</p>
+        <form onSubmit={submit} className="connection-form">
+          <label><span>GitHub owner</span><Input required value={owner} onChange={(event) => setOwner(event.target.value)} autoComplete="off" /></label>
+          <label><span>Private data repository</span><Input required value={repo} onChange={(event) => setRepo(event.target.value)} autoComplete="off" /></label>
+          <label><span>Branch</span><Input required value={branch} onChange={(event) => setBranch(event.target.value)} autoComplete="off" /></label>
+          <label className="connection-token"><span>Fine-grained personal access token</span><div className="relative"><KeyRound className="connection-input-icon" /><Input required type="password" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" placeholder="github_pat_…" /></div></label>
+          {message ? <p className="connection-error" role="alert">{message}</p> : null}
+          <Button type="submit" disabled={connecting} className="connection-submit">{connecting ? "Connecting…" : <><GitBranch /> Connect private repository</>}</Button>
+        </form>
+        <p className="connection-footnote">The token is sent only to GitHub and stored only in this browser on this device. No token is committed to either repository.</p>
+      </section>
+    </main>
   );
 }
 
